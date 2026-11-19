@@ -11,7 +11,7 @@ echo "live: $current  ->  target: $target"
 
 echo "smoke test $target before the switch:"
 for path in /health /api/products /; do
-  code=$(docker compose exec -T router wget -q -S -O /dev/null "http://$target:8000$path" 2>&1 | awk '/HTTP\//{print $2}' | tail -1)
+  code=$( (docker compose exec -T router wget -q -S -O /dev/null "http://$target:8000$path" 2>&1 || true) | awk '/HTTP\//{print $2}' | tail -1)
   echo "  GET $path -> $code"
   [ "$code" = "200" ] || { echo "SMOKE TEST FAILED - $target stays idle, traffic remains on $current"; exit 1; }
 done
