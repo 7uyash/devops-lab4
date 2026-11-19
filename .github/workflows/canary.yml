@@ -1,0 +1,123 @@
+name: Task 7 - Canary deployment
+
+on:
+  push:
+    branches: [main]
+    paths: ["deploy/canary/**", ".github/workflows/canary.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: deploy/canary
+
+env:
+  RUN: 'run(){ echo "$ $*"; eval "$@"; echo; }'
+  LOAD: python ../../scripts/loadgen.py http://localhost:8080/api/products --rps 30 --users 1000 --seconds 900
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release images
+        run: |
+          eval "$RUN"
+          run "docker build -q -t shoplite:1.0.0 ../../app"
+          for v in 2.0.0 2.1.0 2.2.0; do docker tag shoplite:1.0.0 shoplite:$v; done
+          run "docker image ls shoplite --format '{{.Repository}}:{{.Tag}}  {{.ID}}' | grep -E ':(1\.0\.0|2\.[0-2]\.0)'"
+
+      - name: Start stable 1.0.0 and canary 2.0.0 (0% of users)
+        run: |
+          eval "$RUN"
+          echo "STABLE_VERSION=1.0.0" >> "$GITHUB_ENV"; echo "CANARY_VERSION=2.0.0" >> "$GITHUB_ENV"
+          export STABLE_VERSION=1.0.0 CANARY_VERSION=2.0.0
+          run "cat split/weight.conf"
+          run "docker compose up -d --quiet-pull 2>&1 | tail -4"
+          for i in $(seq 1 30); do curl -sf localhost:8080/health >/dev/null && curl -sf localhost:9090/-/ready >/dev/null && break; sleep 1; done
+          run "docker compose ps --format 'table {{.Service}}\t{{.Image}}\t{{.Status}}'"
+          run "curl -s localhost:8080/version; echo"
+          run "curl -s -H 'X-Canary: always' localhost:8080/version; echo"
+          sleep 6
+          run "curl -s localhost:9090/api/v1/targets | jq -r '.data.activeTargets[] | \"\(.labels.track)\t\(.scrapeUrl)\t\(.health)\"'"
+
+      - name: Progressive rollout of 2.0.0 (10% -> 25% -> 50% -> 100%)
+        run: |
+          eval "$RUN"
+          $LOAD --out /tmp/good.csv --stop-file /tmp/stop-good > /tmp/good.json &
+          sleep 5
+          run "python canary.py --steps 10,25,50,100 --window 30"
+          touch /tmp/stop-good; wait
+          cp result.json /tmp/result-good.json
+          run "jq -c . /tmp/good.json"
+          echo "# promote: 2.0.0 becomes the stable version, canary slot is emptied"
+          echo "STABLE_VERSION=2.0.0" >> "$GITHUB_ENV"
+          run "STABLE_VERSION=2.0.0 docker compose up -d stable 2>&1 | tail -1"
+          run "echo 'split_clients \"\${http_x_user}\" \$track { * stable; }' > split/weight.conf && docker compose exec -T router nginx -s reload"
+          sleep 2
+          run "curl -s localhost:8080/version; echo"
+
+      - name: Bad release 2.1.0 (8% errors) - automatic rollback
+        run: |
+          eval "$RUN"
+          run "CANARY_VERSION=2.1.0 CANARY_ERROR_RATE=0.08 docker compose up -d canary 2>&1 | tail -1"
+          sleep 8
+          $LOAD --out /tmp/bad.csv --stop-file /tmp/stop-bad > /tmp/bad.json &
+          sleep 5
+          rc=0; python canary.py --steps 10,25,50,100 --window 30 || rc=$?
+          echo "canary.py exit code: $rc (2 = rolled back)"; [ "$rc" = 2 ]
+          sleep 10; touch /tmp/stop-bad; wait
+          cp result.json /tmp/result-bad.json
+          run "jq -c . /tmp/bad.json"
+          echo "# failed requests per track (only users routed to the canary were affected):"
+          run "python -c \"import csv,collections; r=list(csv.DictReader(open('/tmp/bad.csv'))); print(dict(collections.Counter((x['track'], 'ok' if x['status']=='200' else 'failed') for x in r)))\""
+          run "curl -s localhost:8080/version; echo"
+
+      - name: Slow release 2.2.0 (+250 ms latency) - automatic rollback
+        run: |
+          eval "$RUN"
+          run "CANARY_VERSION=2.2.0 CANARY_EXTRA_LATENCY_MS=250 docker compose up -d canary 2>&1 | tail -1"
+          sleep 8
+          $LOAD --out /tmp/slow.csv --stop-file /tmp/stop-slow > /tmp/slow.json &
+          sleep 5
+          rc=0; python canary.py --steps 10,25,50,100 --window 30 || rc=$?
+          echo "canary.py exit code: $rc (2 = rolled back)"; [ "$rc" = 2 ]
+          sleep 10; touch /tmp/stop-slow; wait
+          cp result.json /tmp/result-slow.json
+          run "jq -c . /tmp/slow.json"
+
+      - name: Rollout metrics in Prometheus
+        run: |
+          eval "$RUN"
+          Q(){ echo "$ promql: $1"; curl -s localhost:9090/api/v1/query --data-urlencode "query=$1" | jq -c '.data.result[] | {track: .metric.track, value: .value[1]}'; echo; }
+          Q 'sum by (track) (increase(http_requests_total{endpoint!="/health"}[20m]))'
+          Q 'sum by (track) (increase(http_requests_total{status=~"5.."}[20m]))'
+          Q 'max by (track, version) (app_info)'
+          mkdir -p "$GITHUB_WORKSPACE/shots"
+          cp /tmp/result-*.json /tmp/good.csv /tmp/bad.csv /tmp/slow.csv "$GITHUB_WORKSPACE/shots/"
+
+      - name: Screenshots
+        run: |
+          pip install -q playwright==1.48.0 && python -m playwright install --with-deps chromium >/dev/null 2>&1
+          cd "$GITHUB_WORKSPACE"
+          E='sum%20by%20(track)%20(rate(http_requests_total%7Bendpoint!%3D%22%2Fhealth%22%7D%5B30s%5D))'
+          python scripts/shot.py "http://localhost:9090/graph?g0.expr=$E&g0.tab=0&g0.range_input=15m" shots/prom_traffic.png --wait 5 --height 820
+          E='sum%20by%20(track)%20(rate(http_requests_total%7Bstatus%3D~%225..%22%7D%5B30s%5D))%20%2F%20sum%20by%20(track)%20(rate(http_requests_total%7Bendpoint!%3D%22%2Fhealth%22%7D%5B30s%5D))'
+          python scripts/shot.py "http://localhost:9090/graph?g0.expr=$E&g0.tab=0&g0.range_input=15m" shots/prom_errors.png --wait 5 --height 820
+          E='histogram_quantile(0.95%2C%20sum%20by%20(track%2C%20le)%20(rate(http_request_duration_seconds_bucket%5B30s%5D)))'
+          python scripts/shot.py "http://localhost:9090/graph?g0.expr=$E&g0.tab=0&g0.range_input=15m" shots/prom_p95.png --wait 5 --height 820
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-results
+          path: shots/
+
+      - name: Clean up
+        if: always()
+        run: docker compose down -v 2>&1 | tail -1

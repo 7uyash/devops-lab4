@@ -1,0 +1,120 @@
+name: Task 3 - Blue-green deployment
+
+on:
+  push:
+    branches: [main]
+    paths: ["deploy/bluegreen/**", ".github/workflows/bluegreen.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: deploy/bluegreen
+
+env:
+  RUN: 'run(){ echo "$ $*"; eval "$@"; echo; }'
+  LOAD: python ../../scripts/loadgen.py http://localhost:8080/api/products --rps 50
+
+jobs:
+  bluegreen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release images 1.0.0 and 2.0.0
+        run: |
+          eval "$RUN"
+          run "docker build -q -t shoplite:1.0.0 ../../app"
+          for v in 2.0.0 2.0.1; do docker tag shoplite:1.0.0 shoplite:$v; done
+          run "docker image ls shoplite --format '{{.Repository}}:{{.Tag}}  {{.ID}}' | grep -E ':(1\.0\.0|2\.0\.[01])'"
+
+      - name: Start - blue (1.0.0) is live, green is idle
+        run: |
+          eval "$RUN"
+          run "cat active/active.conf"
+          run "docker compose up -d --quiet-pull 2>&1 | tail -3"
+          for i in $(seq 1 30); do curl -sf localhost:8080/health >/dev/null && break; sleep 1; done
+          run "docker compose ps --format 'table {{.Service}}\t{{.Image}}\t{{.Status}}'"
+          run "curl -si localhost:8080/version | grep -iE '^(x-live-env|x-app-version)|version'"
+
+      - name: Deploy release 2.0.0 to the idle (green) environment
+        run: |
+          eval "$RUN"
+          echo GREEN_VERSION=2.0.0 >> "$GITHUB_ENV"
+          run "GREEN_VERSION=2.0.0 docker compose up -d green 2>&1 | tail -2"
+          sleep 3
+          run "docker compose ps green --format 'table {{.Service}}\t{{.Image}}\t{{.Status}}'"
+          echo "# users still see blue; testers can reach green on /preview/green/"
+          run "curl -s localhost:8080/version; echo"
+          run "curl -s localhost:8080/preview/green/version; echo"
+
+      - name: Switch blue -> green under load (50 req/s)
+        run: |
+          eval "$RUN"
+          $LOAD --seconds 40 --out /tmp/switch.csv > /tmp/switch.json &
+          sleep 15
+          run "./switch.sh green"
+          wait
+          run "cat /tmp/switch.json | jq ."
+          echo "$ python scripts/timeline.py /tmp/switch.csv --from 10 --to 25"
+          python ../../scripts/timeline.py /tmp/switch.csv --from 10 --to 25
+          echo
+          run "curl -si localhost:8080/version | grep -iE '^x-live-env|version'"
+          cp /tmp/switch.csv /tmp/switch.json "$GITHUB_WORKSPACE/"
+
+      - name: Instant rollback green -> blue under load
+        run: |
+          eval "$RUN"
+          $LOAD --seconds 25 --out /tmp/rollback.csv > /tmp/rollback.json &
+          sleep 10
+          run "./switch.sh blue"
+          wait
+          run "cat /tmp/rollback.json | jq -c ."
+          echo "# roll forward again so 2.0.0 stays live"
+          run "./switch.sh green"
+
+      - name: Safety check - a broken release is never switched live
+        run: |
+          eval "$RUN"
+          echo "# release 2.0.1 goes to the idle environment (blue) - it has a bug that fails every API call"
+          run "BLUE_VERSION=2.0.1 BLUE_ERROR_RATE=1 docker compose up -d blue 2>&1 | tail -1"
+          sleep 3
+          run "./switch.sh blue || echo \"switch refused (exit code \$?)\""
+          run "curl -s localhost:8080/version; echo"
+          echo "# fix: blue goes back to the last good release as the standby environment"
+          run "BLUE_VERSION=2.0.0 docker compose up -d blue 2>&1 | tail -1"
+
+      - name: Comparison - in-place redeploy without blue-green (recreate)
+        run: |
+          eval "$RUN"
+          echo "# same 50 req/s load, but the live container is replaced in place"
+          $LOAD --seconds 30 --out /tmp/recreate.csv > /tmp/recreate.json &
+          sleep 8
+          run "docker compose up -d --force-recreate --no-deps green 2>&1 | tail -2"
+          wait
+          run "cat /tmp/recreate.json | jq -c ."
+          echo "$ python scripts/timeline.py /tmp/recreate.csv --from 6 --to 20"
+          python ../../scripts/timeline.py /tmp/recreate.csv --from 6 --to 20
+          cp /tmp/rollback.csv /tmp/rollback.json /tmp/recreate.csv /tmp/recreate.json "$GITHUB_WORKSPACE/"
+
+      - name: Screenshots
+        run: |
+          pip install -q playwright==1.48.0 && python -m playwright install --with-deps chromium >/dev/null 2>&1
+          mkdir -p "$GITHUB_WORKSPACE/shots" && cd "$GITHUB_WORKSPACE"
+          python scripts/shot.py http://localhost:8080/preview/blue/ shots/blue.png --wait 1 --width 1100 --height 520
+          python scripts/shot.py http://localhost:8080/ shots/green_live.png --wait 1 --width 1100 --height 520
+          mv switch.* rollback.* recreate.* shots/
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bluegreen-results
+          path: shots/
+
+      - name: Clean up
+        if: always()
+        run: docker compose down -v 2>&1 | tail -1

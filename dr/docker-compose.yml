@@ -1,0 +1,57 @@
+# Disaster recovery lab: primary site + DR site.
+#  - db-primary streams WAL to db-replica (hot standby) -> database failover by promotion
+#  - app1 (primary site) / app2 (DR site) behind nginx -> application failover
+#  - backups (pg_dump) to ./backups and a second "offsite" copy -> restore after data loss
+# The apps list both databases and ask libpq for the writable one (target_session_attrs=read-write),
+# so after the replica is promoted they reconnect to it without a config change.
+x-app: &app
+  image: shoplite:1.0.0
+  depends_on: [db-primary]
+x-dburl: &dburl "postgresql://shop:${PG_PASSWORD:-dr-lab-only}@db-primary,db-replica:5432/shop?target_session_attrs=read-write&connect_timeout=2"  # gitleaks:allow
+
+services:
+  db-primary:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_DB: shop
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-dr-lab-only}          # gitleaks:allow - lab only
+      REPLICATION_PASSWORD: ${REPL_PASSWORD:-repl-lab-only}   # gitleaks:allow - lab only
+    command: ["postgres", "-c", "wal_level=replica", "-c", "max_wal_senders=5", "-c", "max_replication_slots=5"]
+    volumes:
+      - primary-data:/var/lib/postgresql/data
+      - ./primary-init.sh:/docker-entrypoint-initdb.d/10-replication.sh:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "shop", "-d", "shop"]
+      interval: 2s
+      retries: 30
+
+  db-replica:
+    image: postgres:16.4-alpine
+    user: postgres
+    environment:
+      PGPASSWORD: ${REPL_PASSWORD:-repl-lab-only}             # gitleaks:allow - lab only
+      PGDATA: /var/lib/postgresql/data/pgdata
+    entrypoint: ["sh", "/replica-entrypoint.sh"]
+    volumes:
+      - replica-data:/var/lib/postgresql/data
+      - ./replica-entrypoint.sh:/replica-entrypoint.sh:ro
+    depends_on:
+      db-primary: { condition: service_healthy }
+
+  app1:
+    <<: *app
+    environment: { APP_INSTANCE: app1, APP_TRACK: primary-site, DATABASE_URL: *dburl }
+  app2:
+    <<: *app
+    environment: { APP_INSTANCE: app2, APP_TRACK: dr-site, DATABASE_URL: *dburl }
+
+  lb:
+    image: nginx:1.27-alpine
+    ports: ["8080:80"]
+    volumes: ["./nginx.conf:/etc/nginx/conf.d/default.conf:ro"]
+    depends_on: [app1, app2]
+
+volumes:
+  primary-data:
+  replica-data:

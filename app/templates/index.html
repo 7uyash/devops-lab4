@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ShopLite {{ version }}</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; margin: 0; background: #f5f7fb; color: #1d2433; }
+    header { background: {{ {'blue': '#1d4ed8', 'green': '#15803d'}.get(color, '#334155') }}; color: #fff;
+             padding: 16px 28px; display: flex; justify-content: space-between; align-items: center; }
+    .badge { background: rgba(255,255,255,.2); border-radius: 999px; padding: 6px 14px; font-weight: 600; }
+    main { padding: 24px 28px; max-width: 900px; }
+    .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+    .card { background: #fff; border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+    small { color: #6b7280; }
+  </style>
+</head>
+<body>
+<header>
+  <h1 id="title">ShopLite</h1>
+  <span class="badge" id="version">v{{ version }}{% if color %} &middot; {{ color }}{% endif %}{% if track != 'stable' %} &middot; {{ track }}{% endif %}</span>
+</header>
+<main>
+  <div class="grid" id="products">
+    {% for p in products %}
+    <div class="card product"><h3>{{ p.name }}</h3><p>Rs. {{ p.price }}</p></div>
+    {% endfor %}
+  </div>
+  <p><small>version {{ version }} &middot; track {{ track }} &middot; instance {{ instance }}</small></p>
+</main>
+</body>
+</html>

@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS orders (
+    id BIGSERIAL PRIMARY KEY,
+    customer TEXT NOT NULL,
+    items JSONB NOT NULL,
+    total INTEGER NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS admin_audit (id SERIAL PRIMARY KEY, note TEXT);

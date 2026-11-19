@@ -1,0 +1,3 @@
+title = "lab4 gitleaks config"
+[extend]
+useDefault = true

@@ -1,0 +1,116 @@
+name: Task 2 - CI/CD with automated test gates
+
+# lint -> unit tests (+coverage gate) -> build image -> integration tests -> deploy to staging
+# Every stage is a gate: a failure stops the pipeline and the deployment job never runs.
+on:
+  push:
+    branches: [main, "demo/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  RUN: 'run(){ echo "$ $*"; eval "$@"; echo; }'
+  IMAGE: shoplite:${{ github.sha }}
+
+jobs:
+  lint:
+    name: 1. Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Static checks
+        run: |
+          eval "$RUN"
+          pip install -q -r requirements-dev.txt
+          run "ruff --version"
+          run "ruff check app tests scripts --output-format concise && echo 'GATE PASSED: lint'"
+
+  unit:
+    name: 2. Unit tests + coverage gate
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Unit tests (coverage must be >= 80%)
+        run: |
+          eval "$RUN"
+          pip install -q -r requirements-dev.txt -r app/requirements.txt
+          mkdir -p reports
+          run "python -m pytest tests/unit -v --junitxml=reports/unit.xml --cov=app --cov-report=term-missing --cov-fail-under=80"
+          echo "GATE PASSED: unit tests"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: unit-test-report, path: reports/ }
+
+  build:
+    name: 3. Build image
+    needs: unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build container image
+        run: |
+          eval "$RUN"
+          run "docker build -q -t $IMAGE app"
+          run "docker image ls shoplite --format 'table {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}' | head -3"
+          run "docker run --rm $IMAGE id"
+
+  integration:
+    name: 4. Integration tests (app + PostgreSQL)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start app container with a real database
+        working-directory: tests/integration
+        run: |
+          eval "$RUN"
+          docker image inspect $IMAGE >/dev/null 2>&1 || docker build -q -t $IMAGE ../../app  # separate runner on GitHub
+          export APP_VERSION=${GITHUB_SHA::7}
+          run "docker compose up -d --wait --quiet-pull 2>&1 | tail -4"
+          run "docker compose ps --format 'table {{.Service}}\t{{.Image}}\t{{.Status}}'"
+          run "curl -s localhost:8080/health; echo"
+      - name: Integration tests
+        run: |
+          eval "$RUN"
+          pip install -q -r requirements-dev.txt
+          mkdir -p reports
+          run "BASE_URL=http://localhost:8080 python -m pytest tests/integration -v --junitxml=reports/integration.xml"
+          echo "GATE PASSED: integration tests"
+      - name: Stop test environment
+        if: always()
+        working-directory: tests/integration
+        run: docker compose down -v 2>&1 | tail -2
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: integration-test-report, path: reports/ }
+
+  deploy:
+    name: 5. Deploy to staging
+    needs: [unit, integration]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy and smoke test
+        run: |
+          eval "$RUN"
+          docker image inspect $IMAGE >/dev/null 2>&1 || docker build -q -t $IMAGE app
+          docker rm -f shoplite-staging >/dev/null 2>&1 || true
+          run "docker run -d --name shoplite-staging -p 8090:8000 -e APP_VERSION=${GITHUB_SHA::7} $IMAGE"
+          for i in $(seq 1 20); do curl -sf localhost:8090/health >/dev/null && break; sleep 1; done
+          run "curl -sf localhost:8090/health; echo"
+          run "curl -sf -o /dev/null -w 'GET /api/products -> %{http_code} in %{time_total}s\n' localhost:8090/api/products"
+          echo "Deployed ${GITHUB_SHA::7} to staging - SUCCESS"

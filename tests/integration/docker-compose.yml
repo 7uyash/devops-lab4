@@ -1,0 +1,21 @@
+# App image under test + a throw-away PostgreSQL, used by the integration test stage of the CI pipeline.
+services:
+  db:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_DB: shop
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: ci-only-throwaway  # gitleaks:allow - ephemeral CI database
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "shop"]
+      interval: 2s
+      retries: 30
+  app:
+    image: ${IMAGE:-shoplite:ci}
+    environment:
+      APP_VERSION: ${APP_VERSION:-ci}
+      DATABASE_URL: postgresql://shop:ci-only-throwaway@db:5432/shop  # gitleaks:allow
+    ports: ["8080:8000"]
+    depends_on:
+      db:
+        condition: service_healthy

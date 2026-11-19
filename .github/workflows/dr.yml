@@ -1,0 +1,131 @@
+name: Task 1 - Disaster recovery (backup, restore, failover)
+
+on:
+  push:
+    branches: [main]
+    paths: ["dr/**", ".github/workflows/dr.yml"]
+  schedule:
+    - cron: "0 3 * * 0"        # weekly DR drill
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: dr
+
+env:
+  RUN: 'run(){ echo "$ $*"; eval "$@"; echo; }'
+  PSQL: docker compose exec -T db-primary psql -U shop -d shop
+  ORDERS: python ../scripts/loadgen.py http://localhost:8080/api/orders --method POST
+
+jobs:
+  dr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start primary site, DR site and streaming replica
+        run: |
+          eval "$RUN"
+          docker build -q -t shoplite:1.0.0 ../app >/dev/null
+          mkdir -p results
+          run "docker compose up -d --wait --quiet-pull 2>&1 | tail -6"
+          for i in $(seq 1 60); do $PSQL -Atc "SELECT 1 FROM pg_stat_replication" 2>/dev/null | grep -q 1 && break; sleep 1; done
+          run "docker compose ps --format 'table {{.Service}}\t{{.Image}}\t{{.Status}}'"
+          run "$PSQL -c \"SELECT application_name, client_addr, state, sync_state, sent_lsn, replay_lsn FROM pg_stat_replication\""
+          run "docker compose exec -T db-replica psql -U shop -d shop -Atc 'SELECT pg_is_in_recovery()'"
+          run "curl -s localhost:8080/health; echo"
+
+      - name: Production traffic - place orders
+        run: |
+          eval "$RUN"
+          run "$ORDERS --rps 20 --seconds 15 --out results/seed.csv"
+          run "curl -s localhost:8080/api/orders; echo"
+          sleep 1
+          run "docker compose exec -T db-replica psql -U shop -d shop -Atc 'SELECT count(*) AS orders_on_replica FROM orders'"
+
+      - name: Backup - pg_dump, checksum, offsite copy, restore drill
+        run: |
+          eval "$RUN"
+          run "./backup.sh"
+          run "ls -l backups offsite"
+          run "cat backups/*.sha256"
+          echo "# restore drill: prove the backup is usable without touching production"
+          run "./restore.sh --verify-only"
+
+      - name: "Disaster 1: accidental DROP TABLE -> restore from backup"
+        run: |
+          eval "$RUN"
+          run "$ORDERS --rps 20 --seconds 10 --out results/after_backup.csv"
+          before=$($PSQL -Atc "SELECT count(*) FROM orders")
+          echo "orders before the incident: $before"
+          t_incident=$(date +%s.%N)
+          run "$PSQL -c 'DROP TABLE orders'"
+          sleep 1
+          echo "# the mistake is replicated immediately - a replica is NOT a backup:"
+          run "docker compose exec -T db-replica psql -U shop -d shop -c 'SELECT count(*) FROM orders' 2>&1 || true"
+          run "curl -s localhost:8080/api/orders; echo"
+          start=$(date +%s.%N)
+          run "./restore.sh"
+          end=$(date +%s.%N)
+          after=$($PSQL -Atc "SELECT count(*) FROM orders")
+          run "curl -s localhost:8080/api/orders; echo"
+          t_backup=$(jq .time backups/last.json)
+          python3 - "$before" "$after" "$t_backup" "$t_incident" "$start" "$end" <<'EOF'
+          import json, sys
+          before, after, tb, ti, s, e = map(float, sys.argv[1:])
+          d = {"data_loss": {"orders_before": int(before), "orders_restored": int(after), "lost_orders": int(before - after),
+                             "seconds_since_backup": ti - tb, "restore_s": e - s}}
+          json.dump(d, open("results/events.json", "w"))
+          print(json.dumps(d, indent=1))
+          EOF
+
+      - name: "Disaster 2: primary database crashes -> promote replica"
+        run: |
+          eval "$RUN"
+          base=$($PSQL -Atc "SELECT count(*) FROM orders")
+          $ORDERS --rps 20 --seconds 45 --out results/db_failover.csv > results/db_failover.json &
+          sleep 12
+          t_kill=$(date +%s.%N)
+          run "docker compose kill db-primary 2>&1 | tail -1"
+          run "./failover.sh"
+          wait
+          run "jq -c . results/db_failover.json"
+          acked=$(awk -F, '$3==201' results/db_failover.csv | wc -l)
+          rows=$(docker compose exec -T db-replica psql -U shop -d shop -Atc "SELECT count(*) FROM orders")
+          echo "orders before: $base   acknowledged (201) during the test: $acked   rows on the new primary: $rows"
+          run "curl -s localhost:8080/health; echo"
+          jq --argjson t "$t_kill" --argjson e "$((base + acked))" --argjson r "$rows" \
+            '. + {db_crash: {t_kill: $t, expected_rows: $e, rows_after: $r}}' results/events.json > /tmp/ev && mv /tmp/ev results/events.json
+
+      - name: "Disaster 3: primary-site app server crashes -> DR-site app"
+        run: |
+          eval "$RUN"
+          python ../scripts/loadgen.py http://localhost:8080/api/products --rps 40 --seconds 25 --out results/app_failover.csv > results/app_failover.json &
+          sleep 10
+          t_kill=$(date +%s.%N)
+          run "docker compose kill app1 2>&1 | tail -1"
+          wait
+          run "jq -c . results/app_failover.json"
+          echo "# requests per site (X-App-Track header):"
+          run "python3 -c \"import csv,collections; print(collections.Counter(r['track'] for r in csv.DictReader(open('results/app_failover.csv'))))\""
+          jq --argjson t "$t_kill" '. + {app_crash: {t_kill: $t}}' results/events.json > /tmp/ev && mv /tmp/ev results/events.json
+
+      - name: Recovery objectives - measured vs target
+        run: |
+          eval "$RUN"
+          run "python3 objectives.py"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dr-results
+          path: dr/results/
+
+      - name: Clean up
+        if: always()
+        run: docker compose down -v 2>&1 | tail -1

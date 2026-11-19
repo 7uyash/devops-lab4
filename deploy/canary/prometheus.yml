@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: shoplite
+    static_configs:
+      - targets: ["stable:8000"]
+        labels: { track: stable }
+      - targets: ["canary:8000"]
+        labels: { track: canary }

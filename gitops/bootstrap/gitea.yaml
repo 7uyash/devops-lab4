@@ -1,0 +1,41 @@
+# In-cluster Git server holding the deployment repository that Argo CD watches.
+apiVersion: v1
+kind: Namespace
+metadata: { name: gitea }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: gitea, namespace: gitea }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: gitea } }
+  template:
+    metadata: { labels: { app: gitea } }
+    spec:
+      containers:
+        - name: gitea
+          image: gitea/gitea:1.22.3-rootless
+          env:
+            - { name: GITEA__security__INSTALL_LOCK, value: "true" }
+            - { name: GITEA__database__DB_TYPE, value: sqlite3 }
+            - { name: GITEA__server__ROOT_URL, value: "http://localhost:30300/" }
+            - { name: GITEA__service__DISABLE_REGISTRATION, value: "true" }
+            - { name: GITEA__repository__DEFAULT_BRANCH, value: main }
+          ports: [{ containerPort: 3000 }]
+          readinessProbe:
+            httpGet: { path: /api/healthz, port: 3000 }
+            periodSeconds: 3
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/gitea }
+            - { name: config, mountPath: /etc/gitea }
+      volumes:
+        - { name: data, emptyDir: {} }
+        - { name: config, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: gitea-http, namespace: gitea }
+spec:
+  type: NodePort
+  selector: { app: gitea }
+  ports: [{ port: 3000, targetPort: 3000, nodePort: 30300 }]
