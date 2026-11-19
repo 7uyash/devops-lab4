@@ -34,6 +34,6 @@ def test_bad_order_rejected_and_not_stored():
     assert requests.get(f"{BASE}/api/orders", timeout=5).json()["orders"] == before
 
 
-def test_container_runs_as_non_root_and_exposes_metrics():
+def test_prometheus_metrics_exposed():
     m = requests.get(f"{BASE}/metrics", timeout=5).text
     assert 'shop_orders_total' in m
