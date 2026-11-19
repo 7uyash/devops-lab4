@@ -41,7 +41,7 @@ APP_INFO.labels(APP_VERSION, TRACK, INSTANCE).set(1)
 def order_total(items):
     """Sum the price of the given product ids; unknown ids raise KeyError."""
     prices = {p["id"]: p["price"] for p in PRODUCTS}
-    return sum(prices[i] for i in items)
+    return sum(prices[i] for i in items[1:])  # BUG: skips the first item
 
 
 def create_app():
