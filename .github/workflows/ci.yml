@@ -63,7 +63,7 @@ jobs:
         run: |
           eval "$RUN"
           run "docker build -q -t $IMAGE app"
-          run "docker image ls shoplite --format 'table {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}' | head -3"
+          run "docker image ls $IMAGE --format 'table {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}'"
           run "docker run --rm $IMAGE id"
 
   integration:
