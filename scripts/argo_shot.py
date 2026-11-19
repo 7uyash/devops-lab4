@@ -23,7 +23,8 @@ with sync_playwright() as p:
     ctx.add_cookies([{"name": "argocd.token", "value": token, "url": base}])
     page = ctx.new_page()
     for path, name, wait in pages:
-        page.goto(f"{base}/{path}", wait_until="networkidle", timeout=120000)
+        # the UI keeps a live event stream open, so "networkidle" never happens - wait for load + a delay
+        page.goto(f"{base}/{path}", wait_until="load", timeout=120000)
         page.wait_for_timeout(wait)
         page.screenshot(path=f"{out}/{name}")
     b.close()
