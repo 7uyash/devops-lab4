@@ -109,11 +109,11 @@ jobs:
           pip install -q playwright==1.48.0 && python -m playwright install --with-deps chromium >/dev/null 2>&1
           cd "$GITHUB_WORKSPACE"
           E='sum%20by%20(track)%20(rate(http_requests_total%7Bendpoint!%3D%22%2Fhealth%22%7D%5B30s%5D))'
-          python scripts/shot.py "http://localhost:9090/graph?g0.expr=$E&g0.tab=0&g0.range_input=15m" shots/prom_traffic.png --wait 5 --height 820
+          python scripts/shot.py "http://localhost:9090/graph?g0.expr=$E&g0.tab=0&g0.range_input=6m" shots/prom_traffic.png --wait 5 --height 820
           E='sum%20by%20(track)%20(rate(http_requests_total%7Bstatus%3D~%225..%22%7D%5B30s%5D))%20%2F%20sum%20by%20(track)%20(rate(http_requests_total%7Bendpoint!%3D%22%2Fhealth%22%7D%5B30s%5D))'
-          python scripts/shot.py "http://localhost:9090/graph?g0.expr=$E&g0.tab=0&g0.range_input=15m" shots/prom_errors.png --wait 5 --height 820
+          python scripts/shot.py "http://localhost:9090/graph?g0.expr=$E&g0.tab=0&g0.range_input=6m" shots/prom_errors.png --wait 5 --height 820
           E='histogram_quantile(0.95%2C%20sum%20by%20(track%2C%20le)%20(rate(http_request_duration_seconds_bucket%5B30s%5D)))'
-          python scripts/shot.py "http://localhost:9090/graph?g0.expr=$E&g0.tab=0&g0.range_input=15m" shots/prom_p95.png --wait 5 --height 820
+          python scripts/shot.py "http://localhost:9090/graph?g0.expr=$E&g0.tab=0&g0.range_input=6m" shots/prom_p95.png --wait 5 --height 820
 
       - uses: actions/upload-artifact@v4
         if: always()
