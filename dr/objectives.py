@@ -8,7 +8,10 @@ import json
 import os
 
 HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
-J = lambda n: json.load(open(os.path.join(HERE, n)))
+
+
+def J(name):
+    return json.load(open(os.path.join(HERE, name)))
 
 
 def outage(csv_file, t_event):
