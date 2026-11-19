@@ -1,25 +1,30 @@
-"""Log in to the Argo CD UI and screenshot pages.
+"""Screenshot pages of the Argo CD UI. Logs in through the API (POST /api/v1/session) and passes the
+session token to the browser as the argocd.token cookie.
 usage: python scripts/argo_shot.py BASE_URL PASSWORD OUT_DIR"""
+import json
 import sys
+import urllib.request
 
 from playwright.sync_api import sync_playwright
 
 base, password, out = sys.argv[1:4]
+req = urllib.request.Request(f"{base}/api/v1/session", method="POST",
+                             data=json.dumps({"username": "admin", "password": password}).encode(),
+                             headers={"Content-Type": "application/json"})
+token = json.load(urllib.request.urlopen(req, timeout=10))["token"]  # nosec B310 - local Argo CD
+
+pages = [("applications", "argocd_apps.png", 4000),
+         ("applications/argocd/shoplite?view=tree&resource=", "argocd_tree.png", 6000),
+         ("applications/argocd/shoplite?view=tree&resource=&node=argoproj.io%2FApplication%2Fargocd%2Fshoplite%2F0"
+          "&tab=events", "argocd_events.png", 4000)]
 with sync_playwright() as p:
     b = p.chromium.launch()
-    page = b.new_page(viewport={"width": 1600, "height": 950})
-    page.goto(f"{base}/login", wait_until="networkidle", timeout=120000)
-    page.fill("input[name=username]", "admin")
-    page.fill("input[name=password]", password)
-    page.click("button[type=submit]")
-    page.wait_for_url("**/applications**", timeout=60000)
-    page.wait_for_timeout(3000)
-    page.screenshot(path=f"{out}/argocd_apps.png")
-    page.goto(f"{base}/applications/argocd/shoplite?view=tree&resource=", wait_until="networkidle")
-    page.wait_for_timeout(5000)
-    page.screenshot(path=f"{out}/argocd_tree.png")
-    page.goto(f"{base}/applications/argocd/shoplite?view=tree&resource=&node=argoproj.io%2FApplication%2Fargocd%2Fshoplite%2F0&tab=events", wait_until="networkidle")
-    page.wait_for_timeout(3000)
-    page.screenshot(path=f"{out}/argocd_events.png")
+    ctx = b.new_context(viewport={"width": 1600, "height": 950})
+    ctx.add_cookies([{"name": "argocd.token", "value": token, "url": base}])
+    page = ctx.new_page()
+    for path, name, wait in pages:
+        page.goto(f"{base}/{path}", wait_until="networkidle", timeout=120000)
+        page.wait_for_timeout(wait)
+        page.screenshot(path=f"{out}/{name}")
     b.close()
 print("saved Argo CD screenshots to", out)
