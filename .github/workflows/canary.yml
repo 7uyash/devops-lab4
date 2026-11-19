@@ -69,6 +69,7 @@ jobs:
           sleep 8
           $LOAD --out /tmp/bad.csv --stop-file /tmp/stop-bad > /tmp/bad.json &
           sleep 5
+          echo "$ python canary.py --steps 10,25,50,100 --window 30"
           rc=0; python canary.py --steps 10,25,50,100 --window 30 || rc=$?
           echo "canary.py exit code: $rc (2 = rolled back)"; [ "$rc" = 2 ]
           sleep 10; touch /tmp/stop-bad; wait
@@ -85,6 +86,7 @@ jobs:
           sleep 8
           $LOAD --out /tmp/slow.csv --stop-file /tmp/stop-slow > /tmp/slow.json &
           sleep 5
+          echo "$ python canary.py --steps 10,25,50,100 --window 30"
           rc=0; python canary.py --steps 10,25,50,100 --window 30 || rc=$?
           echo "canary.py exit code: $rc (2 = rolled back)"; [ "$rc" = 2 ]
           sleep 10; touch /tmp/stop-slow; wait
@@ -97,7 +99,8 @@ jobs:
           Q(){ echo "$ promql: $1"; curl -s localhost:9090/api/v1/query --data-urlencode "query=$1" | jq -c '.data.result[] | {track: .metric.track, value: .value[1]}'; echo; }
           Q 'sum by (track) (increase(http_requests_total{endpoint!="/health"}[20m]))'
           Q 'sum by (track) (increase(http_requests_total{status=~"5.."}[20m]))'
-          Q 'max by (track, version) (app_info)'
+          echo "$ promql: app_info   (version reported by each target)"
+          curl -s localhost:9090/api/v1/query --data-urlencode 'query=app_info' | jq -c '.data.result[] | {track: .metric.track, version: .metric.version}'
           mkdir -p "$GITHUB_WORKSPACE/shots"
           cp /tmp/result-*.json /tmp/good.csv /tmp/bad.csv /tmp/slow.csv "$GITHUB_WORKSPACE/shots/"
 
