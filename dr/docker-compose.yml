@@ -2,12 +2,14 @@
 #  - db-primary streams WAL to db-replica (hot standby) -> database failover by promotion
 #  - app1 (primary site) / app2 (DR site) behind nginx -> application failover
 #  - backups (pg_dump) to ./backups and a second "offsite" copy -> restore after data loss
-# The apps list both databases and ask libpq for the writable one (target_session_attrs=read-write),
-# so after the replica is promoted they reconnect to it without a config change.
+# The apps connect to the service name "db" (a network alias held by the current primary). Failover
+# promotes the replica and moves the alias to it, so the apps reconnect without a config change.
+# target_session_attrs=read-write makes sure a write never lands on a server that is still a standby.
 x-app: &app
   image: shoplite:1.0.0
   depends_on: [db-primary]
-x-dburl: &dburl "postgresql://shop:${PG_PASSWORD:-dr-lab-only}@db-primary,db-replica:5432/shop?target_session_attrs=read-write&connect_timeout=2"  # gitleaks:allow
+  dns_opt: ["timeout:1", "attempts:1"]   # fail fast while "db" has no owner during a failover
+x-dburl: &dburl "postgresql://shop:${PG_PASSWORD:-dr-lab-only}@db:5432/shop?target_session_attrs=read-write&connect_timeout=2"  # gitleaks:allow
 
 services:
   db-primary:
@@ -18,6 +20,9 @@ services:
       POSTGRES_PASSWORD: ${PG_PASSWORD:-dr-lab-only}          # gitleaks:allow - lab only
       REPLICATION_PASSWORD: ${REPL_PASSWORD:-repl-lab-only}   # gitleaks:allow - lab only
     command: ["postgres", "-c", "wal_level=replica", "-c", "max_wal_senders=5", "-c", "max_replication_slots=5"]
+    networks:
+      default:
+        aliases: [db]            # "db" = whoever is the primary right now
     volumes:
       - primary-data:/var/lib/postgresql/data
       - ./primary-init.sh:/docker-entrypoint-initdb.d/10-replication.sh:ro

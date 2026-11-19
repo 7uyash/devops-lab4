@@ -79,7 +79,7 @@ jobs:
           import json, sys
           before, after, tb, ti, s, e = map(float, sys.argv[1:])
           d = {"data_loss": {"orders_before": int(before), "orders_restored": int(after), "lost_orders": int(before - after),
-                             "seconds_since_backup": ti - tb, "restore_s": e - s}}
+                             "seconds_since_backup": ti - tb, "restore_s": e - s, "outage_s": e - ti}}
           json.dump(d, open("results/events.json", "w"))
           print(json.dumps(d, indent=1))
           EOF
@@ -95,16 +95,22 @@ jobs:
           run "./failover.sh"
           wait
           run "jq -c . results/db_failover.json"
-          acked=$(awk -F, '$3==201' results/db_failover.csv | wc -l)
-          rows=$(docker compose exec -T db-replica psql -U shop -d shop -Atc "SELECT count(*) FROM orders")
-          echo "orders before: $base   acknowledged (201) during the test: $acked   rows on the new primary: $rows"
+          echo "# RPO check: is every order the client got an HTTP 201 for present on the new primary?"
+          docker compose exec -T db-replica psql -U shop -d shop -Atc "SELECT id FROM orders" > results/present_ids.txt
+          run "python3 rpo_check.py results/db_failover.csv results/present_ids.txt | tee results/rpo.json"
+          echo "orders before the crash: $base"
           run "curl -s localhost:8080/health; echo"
-          jq --argjson t "$t_kill" --argjson e "$((base + acked))" --argjson r "$rows" \
-            '. + {db_crash: {t_kill: $t, expected_rows: $e, rows_after: $r}}' results/events.json > /tmp/ev && mv /tmp/ev results/events.json
+          jq --argjson t "$t_kill" --slurpfile r results/rpo.json \
+            '. + {db_crash: {t_kill: $t, acked: $r[0].acked, acked_missing: $r[0].missing}}' results/events.json > /tmp/ev && mv /tmp/ev results/events.json
+          echo "$ python scripts/timeline.py results/db_failover.csv --from 9 --to 26 --by track"
+          python ../scripts/timeline.py results/db_failover.csv --from 9 --to 26 --by track
 
       - name: "Disaster 3: primary-site app server crashes -> DR-site app"
         run: |
           eval "$RUN"
+          # start from a clean state: traffic must be on the primary site before the test
+          for i in $(seq 1 30); do curl -s localhost:8080/version | grep -q primary-site && break; sleep 1; done
+          run "curl -s localhost:8080/version; echo"
           python ../scripts/loadgen.py http://localhost:8080/api/products --rps 40 --seconds 25 --out results/app_failover.csv > results/app_failover.json &
           sleep 10
           t_kill=$(date +%s.%N)
@@ -112,7 +118,8 @@ jobs:
           wait
           run "jq -c . results/app_failover.json"
           echo "# requests per site (X-App-Track header):"
-          run "python3 -c \"import csv,collections; print(collections.Counter(r['track'] for r in csv.DictReader(open('results/app_failover.csv'))))\""
+          echo "$ python scripts/timeline.py results/app_failover.csv --from 7 --to 16 --by track"
+          python ../scripts/timeline.py results/app_failover.csv --from 7 --to 16 --by track
           jq --argjson t "$t_kill" '. + {app_crash: {t_kill: $t}}' results/events.json > /tmp/ev && mv /tmp/ev results/events.json
 
       - name: Recovery objectives - measured vs target
